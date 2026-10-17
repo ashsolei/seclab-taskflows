@@ -1,0 +1,17 @@
+name: Trivy SCA public pilot
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  trivy-sca:
+    uses: ./.github/workflows/trivy-sca-reusable.yml
+    with:
+      upload-sarif: true

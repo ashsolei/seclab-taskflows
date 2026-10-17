@@ -1,0 +1,128 @@
+#
+# Purpose:
+# Reusable Trivy software composition analysis (SCA) gate for repository
+# dependencies. Scans the checked-out filesystem, uploads SARIF to GitHub Code
+# Scanning, and produces a CycloneDX SBOM. Findings are report-only in wave one.
+#
+# Inputs:
+# - scan-ref (string): Repository path to scan.
+# - severity (string): Comma-separated vulnerability severities to report.
+# - upload-sarif (boolean): Attempt GitHub Code Scanning upload.
+#
+# Outputs:
+# - None.
+#
+# Example consumer:
+# jobs:
+#   trivy-sca:
+#     uses: Ai-road-4-You/enterprise-ci-cd/.github/workflows/trivy-sca.yml@v1
+#
+name: Trivy SCA
+
+on:
+  workflow_call:
+    inputs:
+      scan-ref:
+        description: "Repository path to scan"
+        type: string
+        default: "."
+      severity:
+        description: "Comma-separated severities to report"
+        type: string
+        default: "CRITICAL,HIGH"
+      upload-sarif:
+        description: "Upload SARIF to GitHub Code Scanning when available"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+concurrency:
+  group: trivy-sca-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sca:
+    name: Trivy Dependency Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Scan repository dependencies
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: "fs"
+          scan-ref: ${{ inputs.scan-ref }}
+          scanners: "vuln"
+          vuln-type: "library"
+          format: "sarif"
+          output: "trivy-sca-results.sarif"
+          severity: ${{ inputs.severity }}
+          exit-code: "0"
+
+      - name: Upload Trivy SARIF artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-sca-sarif
+          path: trivy-sca-results.sarif
+          if-no-files-found: error
+
+      - name: Count vulnerabilities by severity
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: "fs"
+          scan-ref: ${{ inputs.scan-ref }}
+          scanners: "vuln"
+          vuln-type: "library"
+          format: "json"
+          output: "trivy-sca-results.json"
+          severity: ${{ inputs.severity }}
+          exit-code: "0"
+
+      - name: Write vulnerability summary
+        shell: bash
+        run: |
+          {
+            echo '## Trivy SCA findings'
+            echo '| Severity | Findings |'
+            echo '| --- | ---: |'
+            for severity in CRITICAL HIGH MEDIUM LOW UNKNOWN; do
+              count=$(jq --arg severity "$severity" '[.Results[]?.Vulnerabilities[]? | select(.Severity == $severity)] | length' trivy-sca-results.json)
+              echo "| $severity | $count |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate CycloneDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: "fs"
+          scan-ref: ${{ inputs.scan-ref }}
+          format: "cyclonedx"
+          output: "trivy-sca-sbom.cdx.json"
+          exit-code: "0"
+
+      - name: Upload CycloneDX SBOM
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-sca-sbom
+          path: trivy-sca-sbom.cdx.json
+          if-no-files-found: error
+
+      - name: Upload Trivy SARIF
+        id: upload_sarif
+        if: ${{ inputs.upload-sarif && !cancelled() && hashFiles('trivy-sca-results.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: "trivy-sca-results.sarif"
+          category: "trivy-sca"
+
+      - name: Report unavailable Code Scanning
+        if: ${{ steps.upload_sarif.outcome == 'failure' }}
+        run: echo '::warning::SARIF was saved as an artifact, but Code Scanning upload failed.'
